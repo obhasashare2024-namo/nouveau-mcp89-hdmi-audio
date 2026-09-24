@@ -1,0 +1,10 @@
+3b82293802512bdb9ce793e9fcb47d87a42ccb1efe7c7d16932dd0a8fa6c6743  patches/nouveau-mcp89-hdmi-audio-all-in-one.patch
+df306d02a30a2487461b43d5f4332e1697202436404cbc7aecee95174f352795  packages/config-6.6.119-antix.1-amd64-smp
+b0fea4a77b105797b58350017e0d5816b5c064e04f37102ff8ea69091ba3518a  packages/initrd.img-6.6.119-antix.1-amd64-smp
+a98a6f6202c523f5384d3ae623df32a91b0e5e8bef07fafe0773247d73d57e39  packages/nouveau.ko
+c7b0e7bbfe718b6e3295e27d282e7f9763ae1e051aa7fea3fe60d5c70194ea1f  packages/System.map-6.6.119-antix.1-amd64-smp
+98fe29fbf38506c4db32c751d5c94d2e8ad8bffbcff8c298c89e32d38b37b077  packages/vmlinuz-6.6.119-antix.1-amd64-smp
+a4f488f2232abec786d0067b482f3d60fb71dcfd046d4119d9d52ec88961f5eb  scripts/dump_hdmi_regs.py
+8004c564dd9b8e81dee71f27c261c0cc96a1c4305424869eae0aeb792baf390a  scripts/install_module.sh
+66dff9cec59af6e31e947f769c07ac379bc84f02c1910c8402efa8d25a669334  scripts/test_hdmi_audio.sh
+bd85647df2b2abb0931851f635fc56da03b16fe446e218ccf11afb2af78a58a2  README.md

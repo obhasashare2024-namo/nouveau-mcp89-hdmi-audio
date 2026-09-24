@@ -1,0 +1,77 @@
+diff --git a/drivers/gpu/drm/nouveau/dispnv50/disp.c b/drivers/gpu/drm/nouveau/dispnv50/disp.c
+index de8041c94..3c8bacf50 100644
+--- a/drivers/gpu/drm/nouveau/dispnv50/disp.c
++++ b/drivers/gpu/drm/nouveau/dispnv50/disp.c
+@@ -374,6 +374,9 @@ nv50_outp_atomic_fix_depth(struct drm_encoder *encoder, struct drm_crtc_state *c
+ 
+ 	switch (nv_encoder->dcb->type) {
+ 	case DCB_OUTPUT_DP:
++		if (nv_encoder->dp.link_nr == 0 || nv_encoder->dp.link_bw == 0)
++			break;
++
+ 		max_rate = nv_encoder->dp.link_nr * nv_encoder->dp.link_bw;
+ 
+ 		/* we don't support more than 10 anyway */
+@@ -1652,6 +1655,14 @@ nv50_sor_atomic_enable(struct drm_encoder *encoder, struct drm_atomic_state *sta
+ 		nvif_outp_acquire_lvds(&nv_encoder->outp, lvds_dual, lvds_8bpc);
+ 		break;
+ 	case DCB_OUTPUT_DP:
++		if (drm_detect_hdmi_monitor(nv_connector->edid)) {
++			NV_INFO(drm, "DP connector with HDMI sink: forcing HDMI TMDS audio\n");
++			nv50_hdmi_enable(encoder, nv_crtc, nv_connector, state, mode, hda);
++			if (nv_encoder->outp.or.link & 1)
++				proto = NV507D_SOR_SET_CONTROL_PROTOCOL_SINGLE_TMDS_A;
++			else
++				proto = NV507D_SOR_SET_CONTROL_PROTOCOL_SINGLE_TMDS_B;
++		} else {
+ 		nvif_outp_acquire_dp(&nv_encoder->outp, nv_encoder->dp.dpcd, 0, 0, hda, false);
+ 		depth = nv50_dp_bpc_to_depth(asyh->or.bpc);
+ 
+@@ -1661,6 +1672,7 @@ nv50_sor_atomic_enable(struct drm_encoder *encoder, struct drm_atomic_state *sta
+ 			proto = NV887D_SOR_SET_CONTROL_PROTOCOL_DP_B;
+ 
+ 		nv50_audio_enable(encoder, nv_crtc, nv_connector, state, mode);
++		}
+ 
+ #ifdef CONFIG_DRM_NOUVEAU_BACKLIGHT
+ 		backlight = nv_connector->backlight;
+diff --git a/drivers/gpu/drm/nouveau/nvkm/engine/disp/gt215.c b/drivers/gpu/drm/nouveau/nvkm/engine/disp/gt215.c
+index 506ffbe7b..af8e907f9 100644
+--- a/drivers/gpu/drm/nouveau/nvkm/engine/disp/gt215.c
++++ b/drivers/gpu/drm/nouveau/nvkm/engine/disp/gt215.c
+@@ -158,13 +158,32 @@ gt215_sor_hdmi_ctrl(struct nvkm_ior *ior, int head, bool enable, u8 max_ac_packe
+ 	/* Audio InfoFrame */
+ 	nvkm_mask(device, 0x61c500 + soff, 0x00000001, 0x00000000);
+ 	nvkm_wr32(device, 0x61c508 + soff, 0x000a0184);
+-	nvkm_wr32(device, 0x61c50c + soff, 0x00000071);
++	nvkm_wr32(device, 0x61c50c + soff, 0x00000170);
+ 	nvkm_wr32(device, 0x61c510 + soff, 0x00000000);
+ 	nvkm_mask(device, 0x61c500 + soff, 0x00000001, 0x00000001);
+ 
+ 	nvkm_mask(device, 0x61c5d0 + soff, 0x00070001, 0x00010001); /* SPARE, HW_CTS */
+-	nvkm_mask(device, 0x61c568 + soff, 0x00010101, 0x00000000); /* ACR_CTRL, ?? */
+-	nvkm_mask(device, 0x61c578 + soff, 0x80000000, 0x80000000); /* ACR_0441_ENABLE */
++	/* ACR_CTRL: Enable ACR transmission (bit 0) */
++	nvkm_mask(device, 0x61c568 + soff, 0x00000001, 0x00000001);
++
++	/* ACR CTS & N for all standard HDMI audio sampling frequencies */
++	nvkm_wr32(device, 0x61c56c + soff, 148500 << 8);        /* 32.0 kHz CTS */
++	nvkm_wr32(device, 0x61c570 + soff, 0x80000000 | 4096);  /* 32.0 kHz: N=4096 */
++	nvkm_wr32(device, 0x61c574 + soff, 165000 << 8);        /* 44.1 kHz CTS */
++	nvkm_wr32(device, 0x61c578 + soff, 0x80000000 | 6272);  /* 44.1 kHz: N=6272 */
++	nvkm_wr32(device, 0x61c57c + soff, 148500 << 8);        /* 48.0 kHz CTS */
++	nvkm_wr32(device, 0x61c580 + soff, 0x80000000 | 6144);  /* 48.0 kHz: N=6144 */
++	nvkm_wr32(device, 0x61c584 + soff, 165000 << 8);        /* 88.2 kHz CTS */
++	nvkm_wr32(device, 0x61c588 + soff, 0x80000000 | 12544); /* 88.2 kHz: N=12544 */
++	nvkm_wr32(device, 0x61c58c + soff, 148500 << 8);        /* 96.0 kHz CTS */
++	nvkm_wr32(device, 0x61c590 + soff, 0x80000000 | 12288); /* 96.0 kHz: N=12288 */
++	nvkm_wr32(device, 0x61c594 + soff, 165000 << 8);        /* 176.4kHz CTS */
++	nvkm_wr32(device, 0x61c598 + soff, 0x80000000 | 25088); /* 176.4kHz: N=25088 */
++	nvkm_wr32(device, 0x61c59c + soff, 148500 << 8);        /* 192.0kHz CTS */
++	nvkm_wr32(device, 0x61c5a0 + soff, 0x80000000 | 24576); /* 192.0kHz: N=24576 */
++
++	/* Ensure DP_AUDIO is disabled on this SOR in HDMI TMDS mode */
++	nvkm_mask(device, 0x61c1e0 + soff, 0x00000001, 0x00000000);
+ 
+ 	/* ??? */
+ 	nvkm_mask(device, 0x61733c, 0x00100000, 0x00100000); /* RESETF */
