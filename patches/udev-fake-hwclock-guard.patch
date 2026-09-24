@@ -1,0 +1,12 @@
+--- a/lib/udev/hwclock-set
++++ b/lib/udev/hwclock-set
+@@ -6,6 +6,9 @@
+ if [ -e /run/systemd/system ] ; then
+     exit 0
+ fi
++if [ -e /etc/fake-hwclock.data ] ; then
++    exit 0
++fi
+ 
+ /sbin/hwclock --rtc=$dev --systz
+ /sbin/hwclock --rtc=$dev --hctosys
