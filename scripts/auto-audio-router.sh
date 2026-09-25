@@ -6,15 +6,21 @@
 # - TV Connected & Active (Truly ON):
 #   * DP-1 Primary (1080p60 + 16:9 underscan), LVDS-1 OFF (backlight 0)
 #   * NoMachine lands cleanly on the 1080p TV screen
+#   * Permanent DPMS disabled (xset -dpms): TV never receives 'No Signal'
 # - TV Turned Off / Standby / Disconnected:
 #   * Immediately returns LVDS-1 to PRIMARY 1280x800, turns off DP-1
 #   * Restores LVDS-1 backlight to 15
 #   * Switches audio back to internal analog speakers
+#   * Inactivity (3m): Internal LCD backlight to 0
+#   * Inactivity (5m): If no audio playing -> enters S3 sleep (pm-suspend)
 #   * NoMachine lands cleanly on the 1280x800 laptop screen
 # ==============================================================================
 export XDG_RUNTIME_DIR="/run/user/$(id -u 2>/dev/null || echo 1000)"
 export DISPLAY="${DISPLAY:-:0.0}"
 export XAUTHORITY="${XAUTHORITY:-/home/namobuddha/.Xauthority}"
+
+# Permanently disable Xorg DPMS timeout & screen blanking
+xset -dpms s off s noblank 2>/dev/null || true
 
 CARD="alsa_card.pci-0000_00_08.0"
 SINK_HDMI="alsa_output.pci-0000_00_08.0.hdmi-stereo-extra1"
@@ -55,6 +61,9 @@ set_hdmi_display() {
 
   # 3. Apply 16:9 proportional underscan (hborder 48, vborder 27)
   xrandr --output DP-1 --set underscan on --set "underscan hborder" 48 --set "underscan vborder" 27 2>/dev/null || true
+
+  # 4. Guarantee DPMS is off on external display
+  xset -dpms s off s noblank 2>/dev/null || true
 }
 
 set_standalone_display() {
@@ -67,6 +76,9 @@ set_standalone_display() {
   if [ -w "$BACKLIGHT_FILE" ]; then
     echo "$DEFAULT_BRIGHTNESS" > "$BACKLIGHT_FILE" 2>/dev/null || true
   fi
+
+  # 3. Ensure DPMS is off
+  xset -dpms s off s noblank 2>/dev/null || true
 }
 
 # Initial synchronization on startup
@@ -120,7 +132,7 @@ while true; do
   fi
 
   # ============================================================================
-  # Non-Destructive Power Management (Hardware Backlight in Standalone Mode)
+  # Non-Destructive Power Management (Hardware Backlight & S3 Auto-Suspend)
   # ============================================================================
   IDLE_MS=$(DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" xprintidle 2>/dev/null || echo 0)
   NOW=$(date +%s)
@@ -136,7 +148,8 @@ while true; do
       echo 0 > "$BACKLIGHT_FILE" 2>/dev/null || true
     fi
   else
-    # In Standalone Mode: 3-Min Inactivity dims LVDS-1 backlight to 0
+    # In Standalone Mode (TV off / standby):
+    # 1. 3-Min (180s) Inactivity -> dim LVDS-1 backlight to 0
     if [ "$IDLE_MS" -ge 180000 ]; then
       if [ "$BLANKED" -eq 0 ]; then
         if [ -w "$BACKLIGHT_FILE" ]; then
@@ -153,6 +166,29 @@ while true; do
           echo "[$(date '+%Y-%m-%d %H:%M:%S')] User active (${IDLE_MS}ms) -> restored LVDS-1 backlight to $DEFAULT_BRIGHTNESS"
         fi
         BLANKED=0
+      fi
+    fi
+
+    # 2. 5-Min (300s) Inactivity -> Enter S3 sleep (pm-suspend) if no audio is playing
+    if [ "$IDLE_MS" -ge 300000 ] && [ "$AUDIO_PLAYING" -eq 0 ]; then
+      if [ $((NOW - LAST_SUSPEND_TIME)) -ge 300 ]; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Idle 5m (TV off & no active audio) -> entering S3 sleep (pm-suspend)..."
+        sync
+        sudo /usr/sbin/pm-suspend
+        LAST_SUSPEND_TIME=$(date +%s)
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Resumed from S3 sleep, re-aligning displays and audio..."
+        LAST_STATE=""
+        LAST_LID=""
+        BLANKED=0
+        xset -dpms s off s noblank 2>/dev/null || true
+        if is_tv_active; then
+          CURRENT_STATE="HDMI"
+          set_hdmi_display
+        else
+          CURRENT_STATE="ANALOG"
+          set_standalone_display
+        fi
+        LAST_STATE="$CURRENT_STATE"
       fi
     fi
   fi
