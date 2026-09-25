@@ -6,7 +6,7 @@
 # - TV Connected & Active (Truly ON):
 #   * DP-1 Primary (1080p60 + 16:9 underscan), LVDS-1 OFF (backlight 0)
 #   * NoMachine lands cleanly on the 1080p TV screen
-#   * Permanent DPMS disabled (xset -dpms): TV never receives 'No Signal'
+#   * Permanent DPMS disabled (xset -dpms): TV never receives "No Signal"
 # - TV Turned Off / Standby / Disconnected:
 #   * Immediately returns LVDS-1 to PRIMARY 1280x800, turns off DP-1
 #   * Restores LVDS-1 backlight to 15
@@ -14,6 +14,8 @@
 #   * Inactivity (3m): Internal LCD backlight to 0
 #   * Inactivity (5m): If no audio playing -> enters S3 sleep (pm-suspend)
 #   * NoMachine lands cleanly on the 1280x800 laptop screen
+# - Watchdog & Post-Wake Resilience:
+#   * Automatically checks and restores NoMachine server on boot, post-wake, or failure
 # ==============================================================================
 export XDG_RUNTIME_DIR="/run/user/$(id -u 2>/dev/null || echo 1000)"
 export DISPLAY="${DISPLAY:-:0.0}"
@@ -35,13 +37,15 @@ LAST_STATE=""
 LAST_LID=""
 BLANKED=0
 LAST_SUSPEND_TIME=$(date +%s)
+CHECK_NX_COUNTER=0
 
 is_tv_active() {
   local status_file="/sys/class/drm/card0-DP-1/status"
   if [ -r "$status_file" ] && [ "$(cat "$status_file" 2>/dev/null)" = "connected" ]; then
     # Verify TV HDMI audio receiver is actually alive and powered on (not in standby)
     # Both eld_valid=1 and non-empty monitor_name must be present
-    if grep -q 'eld_valid[[:space:]]*1' /proc/asound/card0/eld*.0 2>/dev/null &&        grep -E -q 'monitor_name[[:space:]]+[A-Za-z0-9]' /proc/asound/card0/eld*.0 2>/dev/null; then
+    if grep -q 'eld_valid[[:space:]]*1' /proc/asound/card0/eld*.0 2>/dev/null && \
+       grep -E -q 'monitor_name[[:space:]]+[A-Za-z0-9]' /proc/asound/card0/eld*.0 2>/dev/null; then
       return 0
     fi
   fi
@@ -52,7 +56,8 @@ set_hdmi_display() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] Setting TV single-display mode (DP-1 primary 1080p, LVDS-1 off)..."
 
   # 1. First ensure DP-1 is enabled as Primary and turn LVDS-1 off
-  xrandr --output DP-1 --primary --mode 1920x1080 --rate 60.00 --output LVDS-1 --off 2>/dev/null ||   xrandr --output DP-1 --primary --auto --output LVDS-1 --off 2>/dev/null || true
+  xrandr --output DP-1 --primary --mode 1920x1080 --rate 60.00 --output LVDS-1 --off 2>/dev/null || \
+  xrandr --output DP-1 --primary --auto --output LVDS-1 --off 2>/dev/null || true
 
   # 2. Dim backlight to 0 (completely dark, zero power)
   if [ -w "$BACKLIGHT_FILE" ]; then
@@ -176,7 +181,7 @@ while true; do
         sync
         sudo /usr/sbin/pm-suspend
         LAST_SUSPEND_TIME=$(date +%s)
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Resumed from S3 sleep, re-aligning displays and audio..."
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Resumed from S3 sleep, re-aligning displays, audio and NoMachine..."
         LAST_STATE=""
         LAST_LID=""
         BLANKED=0
@@ -189,7 +194,23 @@ while true; do
           set_standalone_display
         fi
         LAST_STATE="$CURRENT_STATE"
+
+        # Post-wake recovery for NoMachine
+        if ! pgrep -f "/usr/NX/bin/nxd" >/dev/null 2>&1; then
+          echo "[$(date '+%Y-%m-%d %H:%M:%S')] Post-wake: Pulling up NoMachine server..."
+          sudo /etc/NX/nxserver --startup 2>/dev/null || true
+        fi
       fi
+    fi
+  fi
+
+  # Periodic Watchdog for NoMachine (every ~60s = 30 * 2s)
+  CHECK_NX_COUNTER=$((CHECK_NX_COUNTER + 1))
+  if [ "$CHECK_NX_COUNTER" -ge 30 ]; then
+    CHECK_NX_COUNTER=0
+    if ! pgrep -f "/usr/NX/bin/nxd" >/dev/null 2>&1; then
+      echo "[$(date '+%Y-%m-%d %H:%M:%S')] Watchdog: NoMachine down, pulling up..."
+      sudo /etc/NX/nxserver --startup 2>/dev/null || true
     fi
   fi
 
