@@ -3,17 +3,14 @@
 # MacBookPro7,1 (2010 Mid) Ultra-Reliable Smart Audio, Display & Power Daemon
 # - TV detection: reads /sys/class/drm/card0-DP-1/status & /proc/asound/card0/eld*
 #   (Zero xrandr DDC polling in background -> zero I2C collisions -> zero GPU faults)
-# - TV Connected & Active:
-#   * Lid Open: TV primary (1080p60 + 16:9 underscan), LVDS-1 1280x800 on the right
-#   * Lid Closed: Clamshell mode, TV only, LVDS-1 off
-#   * Inactivity (3m): Internal LCD backlight to 0 (dark room, zero GPU mode changes)
-# - TV Turned Off / Disconnected:
+# - TV Connected & Active (Truly ON):
+#   * DP-1 Primary (1080p60 + 16:9 underscan), LVDS-1 OFF (backlight 0)
+#   * NoMachine lands cleanly on the 1080p TV screen
+# - TV Turned Off / Standby / Disconnected:
 #   * Immediately returns LVDS-1 to PRIMARY 1280x800, turns off DP-1
+#   * Restores LVDS-1 backlight to 15
 #   * Switches audio back to internal analog speakers
-#   * Inactivity (3m): Internal LCD backlight to 0
-# - Inactivity (5m):
-#   * If no audio is playing -> auto-suspend (pm-suspend)
-#   * Waking up restores displays seamlessly
+#   * NoMachine lands cleanly on the 1280x800 laptop screen
 # ==============================================================================
 export XDG_RUNTIME_DIR="/run/user/$(id -u 2>/dev/null || echo 1000)"
 export DISPLAY="${DISPLAY:-:0.0}"
@@ -37,7 +34,8 @@ is_tv_active() {
   local status_file="/sys/class/drm/card0-DP-1/status"
   if [ -r "$status_file" ] && [ "$(cat "$status_file" 2>/dev/null)" = "connected" ]; then
     # Verify TV HDMI audio receiver is actually alive and powered on (not in standby)
-    if grep -q 'eld_valid[[:space:]]*1' /proc/asound/card0/eld*.0 2>/dev/null; then
+    # Both eld_valid=1 and non-empty monitor_name must be present
+    if grep -q 'eld_valid[[:space:]]*1' /proc/asound/card0/eld*.0 2>/dev/null &&        grep -E -q 'monitor_name[[:space:]]+[A-Za-z0-9]' /proc/asound/card0/eld*.0 2>/dev/null; then
       return 0
     fi
   fi
@@ -45,40 +43,30 @@ is_tv_active() {
 }
 
 set_hdmi_display() {
-  local lid_closed=0
-  if grep -q 'closed' /proc/acpi/button/lid/*/state 2>/dev/null; then
-    lid_closed=1
-  fi
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Setting TV single-display mode (DP-1 primary 1080p, LVDS-1 off)..."
 
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Setting HDMI display (lid_closed=$lid_closed)..."
+  # 1. First ensure DP-1 is enabled as Primary and turn LVDS-1 off
+  xrandr --output DP-1 --primary --mode 1920x1080 --rate 60.00 --output LVDS-1 --off 2>/dev/null ||   xrandr --output DP-1 --primary --auto --output LVDS-1 --off 2>/dev/null || true
 
-  # Ensure backlight is on
+  # 2. Dim backlight to 0 (completely dark, zero power)
   if [ -w "$BACKLIGHT_FILE" ]; then
-    echo "$DEFAULT_BRIGHTNESS" > "$BACKLIGHT_FILE" 2>/dev/null || true
+    echo 0 > "$BACKLIGHT_FILE" 2>/dev/null || true
   fi
 
-  if [ "$lid_closed" -eq 1 ]; then
-    xrandr --output DP-1 --primary --mode 1920x1080 --rate 60.00 --output LVDS-1 --off 2>/dev/null || \
-    xrandr --output DP-1 --primary --auto --output LVDS-1 --off 2>/dev/null || true
-  else
-    xrandr --output DP-1 --primary --mode 1920x1080 --rate 60.00 --output LVDS-1 --mode 1280x800 --right-of DP-1 2>/dev/null || \
-    xrandr --output DP-1 --primary --auto --output LVDS-1 --mode 1280x800 --right-of DP-1 2>/dev/null || true
-  fi
-
-  # Apply 16:9 proportional underscan (hborder 48, vborder 27)
+  # 3. Apply 16:9 proportional underscan (hborder 48, vborder 27)
   xrandr --output DP-1 --set underscan on --set "underscan hborder" 48 --set "underscan vborder" 27 2>/dev/null || true
 }
 
 set_standalone_display() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] TV inactive -> Setting internal display LVDS-1 primary 1280x800..."
 
-  # Ensure backlight is on
+  # 1. Unconditionally restore LVDS-1 as the sole primary display at native 1280x800, turn off DP-1
+  xrandr --output LVDS-1 --primary --mode 1280x800 --output DP-1 --off 2>/dev/null || true
+
+  # 2. Ensure backlight is restored to default
   if [ -w "$BACKLIGHT_FILE" ]; then
     echo "$DEFAULT_BRIGHTNESS" > "$BACKLIGHT_FILE" 2>/dev/null || true
   fi
-
-  # Unconditionally restore LVDS-1 as the sole primary display at native 1280x800
-  xrandr --output LVDS-1 --primary --mode 1280x800 --output DP-1 --off 2>/dev/null || true
 }
 
 # Initial synchronization on startup
@@ -132,7 +120,7 @@ while true; do
   fi
 
   # ============================================================================
-  # Non-Destructive Power Management (Hardware Backlight + Auto-Suspend)
+  # Non-Destructive Power Management (Hardware Backlight in Standalone Mode)
   # ============================================================================
   IDLE_MS=$(DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" xprintidle 2>/dev/null || echo 0)
   NOW=$(date +%s)
@@ -142,45 +130,30 @@ while true; do
     AUDIO_PLAYING=1
   fi
 
-  # 1. 3-Min (180s) Inactivity -> Turn off LVDS-1 hardware backlight without breaking X11 modes
-  if [ "$IDLE_MS" -ge 180000 ]; then
-    if [ "$BLANKED" -eq 0 ]; then
-      if [ -w "$BACKLIGHT_FILE" ]; then
-        echo 0 > "$BACKLIGHT_FILE" 2>/dev/null || true
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Idle 3m -> dimmed LVDS-1 backlight to 0"
-      fi
-      BLANKED=1
+  # In HDMI Mode: LVDS-1 is off and backlight is locked to 0
+  if [ "$CURRENT_STATE" = "HDMI" ]; then
+    if [ -w "$BACKLIGHT_FILE" ] && [ "$(cat "$BACKLIGHT_FILE" 2>/dev/null)" != "0" ]; then
+      echo 0 > "$BACKLIGHT_FILE" 2>/dev/null || true
     fi
   else
-    # User activity detected -> restore backlight instantly (0ms latency, zero flicker)
-    if [ "$BLANKED" -eq 1 ]; then
-      if [ -w "$BACKLIGHT_FILE" ]; then
-        echo "$DEFAULT_BRIGHTNESS" > "$BACKLIGHT_FILE" 2>/dev/null || true
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] User active (${IDLE_MS}ms) -> restored LVDS-1 backlight to $DEFAULT_BRIGHTNESS"
+    # In Standalone Mode: 3-Min Inactivity dims LVDS-1 backlight to 0
+    if [ "$IDLE_MS" -ge 180000 ]; then
+      if [ "$BLANKED" -eq 0 ]; then
+        if [ -w "$BACKLIGHT_FILE" ]; then
+          echo 0 > "$BACKLIGHT_FILE" 2>/dev/null || true
+          echo "[$(date '+%Y-%m-%d %H:%M:%S')] Idle 3m -> dimmed LVDS-1 backlight to 0"
+        fi
+        BLANKED=1
       fi
-      BLANKED=0
-    fi
-  fi
-
-  # 2. 5-Min (300s) Inactivity -> Auto-Suspend when TV is off/idle & no audio is playing
-  if [ "$IDLE_MS" -ge 300000 ] && [ "$AUDIO_PLAYING" -eq 0 ]; then
-    if [ $((NOW - LAST_SUSPEND_TIME)) -ge 300 ]; then
-      echo "[$(date '+%Y-%m-%d %H:%M:%S')] Idle 5m (no active audio) -> entering sleep (pm-suspend)..."
-      sync
-      sudo /usr/sbin/pm-suspend
-      LAST_SUSPEND_TIME=$(date +%s)
-      echo "[$(date '+%Y-%m-%d %H:%M:%S')] Resumed from sleep, re-aligning displays and audio..."
-      LAST_STATE=""
-      LAST_LID=""
-      BLANKED=0
-      if is_tv_active; then
-        CURRENT_STATE="HDMI"
-        set_hdmi_display
-      else
-        CURRENT_STATE="ANALOG"
-        set_standalone_display
+    else
+      # User active in Standalone mode -> restore backlight instantly
+      if [ "$BLANKED" -eq 1 ]; then
+        if [ -w "$BACKLIGHT_FILE" ]; then
+          echo "$DEFAULT_BRIGHTNESS" > "$BACKLIGHT_FILE" 2>/dev/null || true
+          echo "[$(date '+%Y-%m-%d %H:%M:%S')] User active (${IDLE_MS}ms) -> restored LVDS-1 backlight to $DEFAULT_BRIGHTNESS"
+        fi
+        BLANKED=0
       fi
-      LAST_STATE="$CURRENT_STATE"
     fi
   fi
 

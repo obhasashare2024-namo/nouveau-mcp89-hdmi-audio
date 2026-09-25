@@ -33,11 +33,12 @@ xrandr --output DP-1 --set underscan on --set "underscan hborder" 48 --set "unde
 ```
 This restores all edge pixels (taskbars, window titles, conky) without distortion.
 
-#### B. Smart Audio & Display Router with ACPI Lid Sensing (`scripts/auto-audio-router.sh`)
-* **The Blind Zone Trap**: Turning off the TV with a remote leaves the HDMI chip powered, keeping the Mini-DP HPD signal high (`DP-1 connected`). Naive scripts that turn off the laptop screen (`LVDS-1 --off`) leave the laptop with zero active displays, causing window managers to lock up and NoMachine to crash into a read-only shadow session (Display 1002).
-* **The Solution**: The daemon reads `/proc/acpi/button/lid/*/state`:
-  * **Lid Open**: Safe Dual-Display Mode. TV is set as Primary (1080p60 + 48/27 underscan), and the laptop display (LVDS-1 1280x800) remains ON as a failsafe anchor.
-  * **Lid Closed**: Clamshell Mode. Turns off LVDS-1, dedicating full GPU bandwidth and VRAM to the TV.
+#### B. Smart Audio & Display Router with Audio-ELD Sensing & Single-Display Mode (`scripts/auto-audio-router.sh`)
+* **The 5V Standby Blind Zone Trap**: Turning off a TV via remote keeps its HDMI receiver board powered on standby, holding the HPD line high (`DP-1 connected`). Naive detection methods that rely solely on `status=connected` mistakenly treat the TV as ON, turning off the laptop screen (`LVDS-1 --off`) and leaving the machine with zero responsive displays—locking out both physical users and NoMachine remote sessions.
+* **The Triple-Defense Solution**:
+  * **Protocol-Level Audio ELD Sensing**: The daemon inspects `/proc/asound/card0/eld*.0` for `eld_valid 1` and an active `monitor_name` (e.g. `SONIQ`). When the TV powers off to standby, its HDMI audio sink shuts down and ELD drops to 0, preventing false positives.
+  * **True TV Single-Display Mode**: When the TV is truly active, `DP-1` is set as Primary 1080p60 (with 48/27 underscan), `LVDS-1` is set to `--off` in X11, and the hardware backlight (`/sys/class/backlight/nv_backlight/brightness`) is set to `0`. This eliminates mouse drift, window spawning on invisible screens, and light pollution in a dark room.
+  * **Instant Standby/Off Fallback & NoMachine Adaptive Routing**: Within 1-2 seconds of TV power-off, the daemon automatically restores `LVDS-1` to 1280x800 Primary and resets backlight to 15. NoMachine lands cleanly on the 1080p TV display when the TV is on, and seamlessly lands on the 1280x800 laptop screen when the TV is off.
 
 #### C. NoMachine Physical Desktop Access & Permission Hardening
 To prevent NoMachine from dropping into a read-only mode during HDMI hotplugging:
@@ -107,11 +108,12 @@ xrandr --output DP-1 --set underscan on --set "underscan hborder" 48 --set "unde
 ```
 邊角無損回正，字體銳利清晰。
 
-#### B. 雙頭智感切換守護行程 (`scripts/auto-audio-router.sh`)
-* **關機假在線盲區**：電視用遙控器關閉後，HDMI 晶片待機通電，Mini-DP 仍回傳 `DP-1 connected`。若直接將筆電螢幕熄滅（`LVDS-1 --off`），會造成全機無任何物理輸出，桌面管理器卡死且 NoMachine 崩潰成唯讀影子會話。
-* **ACPI 開闔蓋感應**：腳本即時讀取 `/proc/acpi/button/lid/*/state`：
-  * **開蓋狀態（Lid Open）**：安全雙屏模式。電視設為 Primary（1080p60 + 48/27 欠掃描），筆電內建螢幕（LVDS-1 1280x800）強制常亮作為實體掃描錨點，永不黑屏！
-  * **闔蓋狀態（Lid Closed）**：閉蓋（Clamshell）模式。關閉內建屏，將全部顯存與算力專供電視。
+#### B. 協議級音訊 ELD 探針與真電視單屏獨占路由（含 NoMachine 自適應導向）
+* **待機 5V 偽在線盲區**：電視用遙控器關閉後，HDMI 接收晶片維持待機供電，Mini-DP 持續維持 HPD 高電位（`DP-1 connected`）。若單純依賴 `status` 判斷，系統會誤認電視開機而關閉筆電螢幕（`LVDS-1 --off`），導致整機無活動物理輸出，本機與 NoMachine 遠端連線同步陷入黑屏鎖死。
+* **三重防線自癒架構**：
+  * **協議級音訊 ELD 探針**：即時讀取核心 ALSA 節點 `/proc/asound/card0/eld*.0`，嚴格檢驗 `eld_valid 1` 與實體設備名稱（如 `SONIQ`）。電視待機或關閉時音訊晶片斷電、ELD 降為 0，徹底杜絕誤判。
+  * **真電視單屏獨占模式**：電視真正開機時，自動設 `DP-1` 為 Primary 1080p60（含 48/27 欠掃描防溢邊），`LVDS-1` 徹底 `--off` 且寫入背光為 `0`（`/sys/class/backlight/nv_backlight/brightness`）。鼠標不再滑出電視邊界，視窗絕對置中，筆電物理零漏光、零功耗。
+  * **電視關閉自癒退守與 NoMachine 導向**：電視一旦關閉（ELD 消失瞬間），守護行程於 1~2 秒內秒級切換 `LVDS-1` 為 Primary 1280x800 並秒亮背光（亮度 15）。電視開機時 NoMachine 直連 1080p 電視，電視關機時直連 1280x800 筆電，雙軌自適應。
 
 #### C. NoMachine 實體桌面權限與穿透配置
 防止遠端接入被限制為只讀或無法點擊：
@@ -166,11 +168,12 @@ xrandr --output DP-1 --set underscan on --set "underscan hborder" 48 --set "unde
 ```
 彻底还原任务栏与四周边界，告别画面裁剪。
 
-#### B. 双屏智感路由守护进程 (`scripts/auto-audio-router.sh`)
-* **假在线黑屏盲区**：遥控器关机后电视 HDMI 待机通电，Mini-DP 仍维持 High HPD。若单纯关屏（`LVDS-1 --off`），会导致整机无物理输出，窗口管理器卡死，NoMachine 降级为只读 Display 1002。
-* **ACPI 开阖盖感知**：
-  * **开盖状态**：安全双屏模式。电视为主屏（1080p60 + 欠扫描），笔记本内建屏（1280x800）保持点亮作为物理锚点，绝不黑屏。
-  * **合盖状态**：Clamshell 模式。关闭内建屏，全算力与显存专供电视。
+#### B. 协议级音频 ELD 探针与真电视单屏独占路由（含 NoMachine 自适应导向）
+* **待机 5V 伪在线盲区**：电视用遥控器关机后，HDMI 接收芯片维持待机供电，Mini-DP 仍维持 High HPD（`DP-1 connected`）。若单纯依赖 `status` 判定，系统会误认电视开机而将笔记本内建屏关闭（`LVDS-1 --off`），导致整机无物理输出，窗口管理器卡死，NoMachine 与本地双双陷入黑屏死锁。
+* **三重防线自愈架构**：
+  * **协议级音频 ELD 探针**：实时读取内核 ALSA 节点 `/proc/asound/card0/eld*.0`，严格检验 `eld_valid 1` 与实体设备名称（如 `SONIQ`）。电视待机或关机时音频芯片断电、ELD 降为 0，彻底杜绝误判。
+  * **真电视单屏独占模式**：电视真正开机时，自动设 `DP-1` 为 Primary 1080p60（含 48/27 欠扫描防溢边），`LVDS-1` 彻底 `--off` 且将背光写入 `0`（`/sys/class/backlight/nv_backlight/brightness`）。鼠标不再滑出电视边界，窗口绝对居中，笔记本物理零漏光、零功耗。
+  * **电视关机自愈退守与 NoMachine 导向**：电视一旦关闭（ELD 消失瞬间），守护进程在 1~2 秒内秒级切换 `LVDS-1` 为 Primary 1280x800 并秒亮背光（亮度 15）。电视开机时 NoMachine 直连 1080p 电视，电视关机时直连 1280x800 笔记本，双轨自适应。
 
 #### C. NoMachine 物理桌面权限解锁
 解决外接屏状态下被判定为只读会话及鼠标无法点击：
