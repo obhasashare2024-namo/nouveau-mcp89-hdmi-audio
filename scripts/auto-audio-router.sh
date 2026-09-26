@@ -3,6 +3,10 @@
 # MacBookPro7,1 (2010 Mid) Ultra-Reliable Smart Audio, Display & Power Daemon
 # - TV detection: reads /sys/class/drm/card0-DP-1/status & /proc/asound/card0/eld*
 #   (Zero xrandr DDC polling in background -> zero I2C collisions -> zero GPU faults)
+# - Active Probe & Debounce Engine:
+#   * Prevents false "TV inactive" deadlocks after S3 resume or reboot
+#   * 10s debounce on TV off (prevents transient HDMI/audio blinks from dropping screen)
+#   * Active 6s probe when in Standalone mode to auto-detect TV power-on
 # - TV Connected & Active (Truly ON):
 #   * DP-1 Primary (1080p60 + 16:9 underscan), LVDS-1 OFF (backlight 0)
 #   * NoMachine lands cleanly on the 1080p TV screen
@@ -44,6 +48,8 @@ BLANKED=0
 LAST_SUSPEND_TIME=$(date +%s)
 LAST_WAKE_OR_MODE_CHANGE=$(date +%s)
 CHECK_NX_COUNTER=0
+TV_INACTIVE_COUNT=0
+PROBE_TV_COUNTER=0
 
 is_tv_active() {
   local status_file="/sys/class/drm/card0-DP-1/status"
@@ -53,6 +59,23 @@ is_tv_active() {
     if grep -q 'eld_valid[[:space:]]*1' /proc/asound/card0/eld*.0 2>/dev/null && \
        grep -E -q 'monitor_name[[:space:]]+[A-Za-z0-9]' /proc/asound/card0/eld*.0 2>/dev/null; then
       return 0
+    fi
+  fi
+  return 1
+}
+
+probe_dp1_if_connected() {
+  local status_file="/sys/class/drm/card0-DP-1/status"
+  if [ -r "$status_file" ] && [ "$(cat "$status_file" 2>/dev/null)" = "connected" ]; then
+    # Briefly activate DP-1 so the kernel HDA codec powers on pin and updates ELD
+    xrandr --output DP-1 --mode 1920x1080 --rate 60.00 2>/dev/null || true
+    sleep 0.8
+    if is_tv_active; then
+      return 0
+    else
+      # Inactive / off: turn DP-1 back off
+      xrandr --output DP-1 --off 2>/dev/null || true
+      return 1
     fi
   fi
   return 1
@@ -81,6 +104,8 @@ set_hdmi_display() {
 
   LAST_WAKE_OR_MODE_CHANGE=$(date +%s)
   BLANKED=0
+  TV_INACTIVE_COUNT=0
+  PROBE_TV_COUNTER=0
 }
 
 set_standalone_display() {
@@ -102,10 +127,12 @@ set_standalone_display() {
 
   LAST_WAKE_OR_MODE_CHANGE=$(date +%s)
   BLANKED=0
+  TV_INACTIVE_COUNT=0
+  PROBE_TV_COUNTER=0
 }
 
 # Initial synchronization on startup
-if is_tv_active; then
+if is_tv_active || probe_dp1_if_connected; then
   CURRENT_STATE="HDMI"
   set_hdmi_display
 else
@@ -115,10 +142,29 @@ fi
 LAST_STATE="$CURRENT_STATE"
 
 while true; do
-  if is_tv_active; then
-    CURRENT_STATE="HDMI"
+  if [ "$CURRENT_STATE" = "HDMI" ]; then
+    if is_tv_active; then
+      TV_INACTIVE_COUNT=0
+    else
+      TV_INACTIVE_COUNT=$((TV_INACTIVE_COUNT + 1))
+      # Debounce: Require 5 consecutive failed checks (10s) before declaring TV off
+      if [ "$TV_INACTIVE_COUNT" -ge 5 ]; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] TV inactive for 10s (ELD dropped) -> switching to Standalone"
+        CURRENT_STATE="ANALOG"
+        TV_INACTIVE_COUNT=0
+      fi
+    fi
   else
-    CURRENT_STATE="ANALOG"
+    # Currently in ANALOG (Standalone Mode)
+    # Periodically probe DP-1 every ~6s (3 loops * 2s) to see if TV was turned back on
+    PROBE_TV_COUNTER=$((PROBE_TV_COUNTER + 1))
+    if [ "$PROBE_TV_COUNTER" -ge 3 ]; then
+      PROBE_TV_COUNTER=0
+      if probe_dp1_if_connected; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Probe detected TV powered ON -> switching to HDMI"
+        CURRENT_STATE="HDMI"
+      fi
+    fi
   fi
 
   CURRENT_LID=$(grep -oE 'open|closed' /proc/acpi/button/lid/*/state 2>/dev/null || echo "open")
@@ -203,12 +249,16 @@ while true; do
         sudo /usr/sbin/pm-suspend
         LAST_SUSPEND_TIME=$(date +%s)
         LAST_WAKE_OR_MODE_CHANGE=$(date +%s)
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Resumed from S3 sleep, re-aligning displays, audio and NoMachine..."
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Resumed from S3 sleep, probing displays..."
         LAST_STATE=""
         LAST_LID=""
         BLANKED=0
+        TV_INACTIVE_COUNT=0
+        PROBE_TV_COUNTER=0
         xset -dpms s off s noblank 2>/dev/null || true
-        if is_tv_active; then
+
+        # Critical: Probe DP-1 on resume so codec powers up and reads ELD
+        if probe_dp1_if_connected; then
           CURRENT_STATE="HDMI"
           set_hdmi_display
         else
