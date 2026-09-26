@@ -6,17 +6,22 @@
 # - TV Connected & Active (Truly ON):
 #   * DP-1 Primary (1080p60 + 16:9 underscan), LVDS-1 OFF (backlight 0)
 #   * NoMachine lands cleanly on the 1080p TV screen
+#   * Refresh IceWM (icesh restart) to dock taskbar at bottom of 1080p TV
 #   * Permanent DPMS disabled (xset -dpms): TV never receives "No Signal"
 # - TV Turned Off / Standby / Disconnected:
 #   * Immediately returns LVDS-1 to PRIMARY 1280x800, turns off DP-1
-#   * Restores LVDS-1 backlight to 15
+#   * Restores LVDS-1 backlight to 40
+#   * Refresh IceWM (icesh restart) to dock taskbar at bottom of 1280x800 internal screen
 #   * Switches audio back to internal analog speakers
-#   * Inactivity (3m): Internal LCD backlight to 0
-#   * Inactivity (5m): If no audio playing -> enters S3 sleep (pm-suspend)
+#   * Grace Period Protection: Prevents stale pre-wake idle time from blacking out screen
+#   * Inactivity (3m fresh idle): Internal LCD backlight to 0
+#   * Inactivity (5m fresh idle): If no audio playing -> enters S3 sleep (pm-suspend)
 #   * NoMachine lands cleanly on the 1280x800 laptop screen
 # - Watchdog & Post-Wake Resilience:
 #   * Automatically checks and restores NoMachine server on boot, post-wake, or failure
 # ==============================================================================
+trap '' HUP
+
 export XDG_RUNTIME_DIR="/run/user/$(id -u 2>/dev/null || echo 1000)"
 export DISPLAY="${DISPLAY:-:0.0}"
 export XAUTHORITY="${XAUTHORITY:-/home/namobuddha/.Xauthority}"
@@ -31,12 +36,13 @@ PROFILE_HDMI="output:hdmi-stereo-extra1+input:analog-stereo"
 PROFILE_ANALOG="output:analog-stereo+input:analog-stereo"
 
 BACKLIGHT_FILE="/sys/class/backlight/nv_backlight/brightness"
-DEFAULT_BRIGHTNESS=15
+DEFAULT_BRIGHTNESS=40
 
 LAST_STATE=""
 LAST_LID=""
 BLANKED=0
 LAST_SUSPEND_TIME=$(date +%s)
+LAST_WAKE_OR_MODE_CHANGE=$(date +%s)
 CHECK_NX_COUNTER=0
 
 is_tv_active() {
@@ -69,6 +75,12 @@ set_hdmi_display() {
 
   # 4. Guarantee DPMS is off on external display
   xset -dpms s off s noblank 2>/dev/null || true
+
+  # 5. Refresh IceWM to immediately dock taskbar at bottom of 1920x1080
+  DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" icesh restart 2>/dev/null || true
+
+  LAST_WAKE_OR_MODE_CHANGE=$(date +%s)
+  BLANKED=0
 }
 
 set_standalone_display() {
@@ -84,6 +96,12 @@ set_standalone_display() {
 
   # 3. Ensure DPMS is off
   xset -dpms s off s noblank 2>/dev/null || true
+
+  # 4. Refresh IceWM to immediately dock taskbar at bottom of 1280x800
+  DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" icesh restart 2>/dev/null || true
+
+  LAST_WAKE_OR_MODE_CHANGE=$(date +%s)
+  BLANKED=0
 }
 
 # Initial synchronization on startup
@@ -141,6 +159,7 @@ while true; do
   # ============================================================================
   IDLE_MS=$(DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" xprintidle 2>/dev/null || echo 0)
   NOW=$(date +%s)
+  SINCE_WAKE=$((NOW - LAST_WAKE_OR_MODE_CHANGE))
 
   AUDIO_PLAYING=0
   if pactl list sinks 2>/dev/null | grep -q 'State: RUNNING'; then
@@ -155,7 +174,8 @@ while true; do
   else
     # In Standalone Mode (TV off / standby):
     # 1. 3-Min (180s) Inactivity -> dim LVDS-1 backlight to 0
-    if [ "$IDLE_MS" -ge 180000 ]; then
+    # Must also respect SINCE_WAKE >= 180 so stale pre-wake idle time doesn't extinguish screen on wake!
+    if [ "$SINCE_WAKE" -ge 180 ] && [ "$IDLE_MS" -ge 180000 ]; then
       if [ "$BLANKED" -eq 0 ]; then
         if [ -w "$BACKLIGHT_FILE" ]; then
           echo 0 > "$BACKLIGHT_FILE" 2>/dev/null || true
@@ -164,23 +184,25 @@ while true; do
         BLANKED=1
       fi
     else
-      # User active in Standalone mode -> restore backlight instantly
-      if [ "$BLANKED" -eq 1 ]; then
+      # User active in Standalone mode or within wake grace period -> ensure backlight is on
+      if [ "$BLANKED" -eq 1 ] && ([ "$IDLE_MS" -lt 180000 ] || [ "$SINCE_WAKE" -lt 180 ]); then
         if [ -w "$BACKLIGHT_FILE" ]; then
           echo "$DEFAULT_BRIGHTNESS" > "$BACKLIGHT_FILE" 2>/dev/null || true
-          echo "[$(date '+%Y-%m-%d %H:%M:%S')] User active (${IDLE_MS}ms) -> restored LVDS-1 backlight to $DEFAULT_BRIGHTNESS"
+          echo "[$(date '+%Y-%m-%d %H:%M:%S')] User active (${IDLE_MS}ms) or wake -> restored LVDS-1 backlight to $DEFAULT_BRIGHTNESS"
         fi
         BLANKED=0
       fi
     fi
 
     # 2. 5-Min (300s) Inactivity -> Enter S3 sleep (pm-suspend) if no audio is playing
-    if [ "$IDLE_MS" -ge 300000 ] && [ "$AUDIO_PLAYING" -eq 0 ]; then
+    # Must also respect SINCE_WAKE >= 300 to avoid immediate re-suspend loop!
+    if [ "$SINCE_WAKE" -ge 300 ] && [ "$IDLE_MS" -ge 300000 ] && [ "$AUDIO_PLAYING" -eq 0 ]; then
       if [ $((NOW - LAST_SUSPEND_TIME)) -ge 300 ]; then
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] Idle 5m (TV off & no active audio) -> entering S3 sleep (pm-suspend)..."
         sync
         sudo /usr/sbin/pm-suspend
         LAST_SUSPEND_TIME=$(date +%s)
+        LAST_WAKE_OR_MODE_CHANGE=$(date +%s)
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] Resumed from S3 sleep, re-aligning displays, audio and NoMachine..."
         LAST_STATE=""
         LAST_LID=""
